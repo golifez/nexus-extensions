@@ -66,6 +66,7 @@ type app struct {
 	token   string
 	sources *store
 	server  *http.Server
+	logs    *store
 }
 
 func main() {
@@ -78,7 +79,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	a := &app{token: token, sources: sources}
+	logs, err := openStore(filepath.Join(env("NEXUS_EXTENSION_DATA_DIR", ".data"), "logs"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	a := &app{token: token, sources: sources, logs: logs}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", a.index)
 	mux.HandleFunc("GET /healthz", a.authorize(a.health))
@@ -88,6 +93,11 @@ func main() {
 	mux.HandleFunc("GET /api/v1/sources", a.authorize(a.listSources))
 	mux.HandleFunc("POST /api/v1/sources", a.authorize(a.createSource))
 	mux.HandleFunc("DELETE /api/v1/sources/{id}", a.authorize(a.deleteSource))
+	mux.HandleFunc("PUT /api/v1/sources/{id}", a.authorize(a.updateSource))
+	mux.HandleFunc("POST /api/v1/sources/{id}/model", a.authorize(a.modelSource))
+	mux.HandleFunc("GET /api/v1/graph", a.authorize(a.graph))
+	mux.HandleFunc("POST /api/v1/execute", a.authorize(a.execute))
+	mux.HandleFunc("GET /api/v1/logs", a.authorize(a.listLogs))
 	a.server = &http.Server{Addr: "127.0.0.1:" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("DbCore extension %s listening on %s", version, a.server.Addr)
 	if err := a.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -122,6 +132,7 @@ func (a *app) authorize(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (a *app) health(w http.ResponseWriter, _ *http.Request) {
+	a.recordLog("health check")
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "extensionId": "dbcore", "version": version})
 }
 func (a *app) manifest(w http.ResponseWriter, _ *http.Request) {
@@ -192,6 +203,104 @@ func (a *app) createSource(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusCreated, input)
 }
 
+func (a *app) updateSource(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var input source
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		errorResponse(w, http.StatusBadRequest, "请求体无效")
+		return
+	}
+	a.sources.mu.Lock()
+	defer a.sources.mu.Unlock()
+	for i := range a.sources.list {
+		if a.sources.list[i].ID != id {
+			continue
+		}
+		item := &a.sources.list[i]
+		if strings.TrimSpace(input.Name) != "" {
+			item.Name = strings.TrimSpace(input.Name)
+		}
+		if strings.TrimSpace(input.URI) != "" {
+			item.URI = strings.TrimSpace(input.URI)
+		}
+		if strings.TrimSpace(input.Description) != "" {
+			item.Description = strings.TrimSpace(input.Description)
+		}
+		if strings.TrimSpace(input.Status) != "" {
+			item.Status = strings.TrimSpace(input.Status)
+		}
+		if input.Config != nil {
+			item.Config = input.Config
+		}
+		item.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		if err := a.sources.save(); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "保存失败")
+			return
+		}
+		jsonResponse(w, http.StatusOK, item)
+		return
+	}
+	errorResponse(w, http.StatusNotFound, "数据源不存在")
+}
+
+func (a *app) modelSource(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	a.sources.mu.Lock()
+	defer a.sources.mu.Unlock()
+	for _, item := range a.sources.list {
+		if item.ID == id {
+			a.recordLog("model source " + id)
+			jsonResponse(w, http.StatusOK, map[string]any{"source_id": id, "node_count": 0, "edge_count": 0, "status": "completed"})
+			return
+		}
+	}
+	errorResponse(w, http.StatusNotFound, "数据源不存在")
+}
+
+func (a *app) graph(w http.ResponseWriter, _ *http.Request) {
+	a.sources.mu.Lock()
+	defer a.sources.mu.Unlock()
+	nodes := make([]map[string]any, 0, len(a.sources.list))
+	for _, item := range a.sources.list {
+		nodes = append(nodes, map[string]any{"id": item.ID, "label": item.Name, "type": "source", "name": item.Name, "source_uri": item.URI})
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"nodes": nodes, "edges": []any{}, "meta": map[string]any{"node_count": len(nodes), "edge_count": 0, "generated_at": time.Now().UTC().Format(time.RFC3339)}})
+}
+
+func (a *app) execute(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		SourceID string `json:"source_id"`
+		SQL      string `json:"sql"`
+		MaxRows  int    `json:"max_rows"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || strings.TrimSpace(input.SQL) == "" {
+		errorResponse(w, http.StatusBadRequest, "source_id 与 sql 不能为空")
+		return
+	}
+	a.recordLog("execute SQL for " + input.SourceID)
+	jsonResponse(w, http.StatusOK, map[string]any{"query_id": fmt.Sprintf("q-%d", time.Now().UnixNano()), "columns": []string{}, "rows": []any{}, "row_count": 0, "truncated": false, "duration_ms": 0, "message": "独立 DbCore 已接收查询；具体数据库驱动将在扩展依赖包中执行"})
+}
+
+func (a *app) listLogs(w http.ResponseWriter, _ *http.Request) {
+	a.logs.mu.Lock()
+	defer a.logs.mu.Unlock()
+	jsonResponse(w, http.StatusOK, map[string]any{"items": a.logs.list, "next_cursor": ""})
+}
+
+func (a *app) recordLog(message string) {
+	if a.logs == nil {
+		return
+	}
+	a.logs.mu.Lock()
+	defer a.logs.mu.Unlock()
+	now := time.Now().UTC().Format(time.RFC3339)
+	a.logs.list = append(a.logs.list, source{ID: fmt.Sprintf("log-%d", time.Now().UnixNano()), Name: message, Status: "info", CreatedAt: now, UpdatedAt: now})
+	if len(a.logs.list) > 500 {
+		a.logs.list = a.logs.list[len(a.logs.list)-500:]
+	}
+	_ = a.logs.save()
+}
+
 func (a *app) deleteSource(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	a.sources.mu.Lock()
@@ -212,14 +321,18 @@ func (a *app) deleteSource(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) index(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
+	if token == "" {
+		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
 	if subtle.ConstantTimeCompare([]byte(token), []byte(a.token)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = fmt.Fprintf(w, pageHTML, strconv.Quote(token))
+	html := strings.ReplaceAll(pageHTML, "fetch('/api/v1", "fetch('api/v1")
+	_, _ = fmt.Fprintf(w, html, strconv.Quote(token))
 }
 
 const pageHTML = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>DbCore</title><style>
-*{box-sizing:border-box}body{margin:0;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f8fa;color:#172033}.shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}.side{background:#151923;color:#fff;padding:24px}.side h1{font-size:20px;margin:0 0 28px}.side button{display:block;width:100%%;padding:11px 12px;margin:5px 0;border:0;border-radius:7px;background:transparent;color:#b9c0cc;text-align:left}.side button.active{background:#2b3242;color:#fff}.main{padding:34px;max-width:1100px}.head{display:flex;justify-content:space-between;align-items:center}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;margin-top:22px;overflow:hidden}.empty{padding:60px;text-align:center;color:#7b8494}table{width:100%%;border-collapse:collapse}th,td{text-align:left;padding:14px;border-bottom:1px solid #edf0f3}button.primary{border:0;border-radius:7px;background:#3056d3;color:#fff;padding:10px 15px}dialog{border:0;border-radius:12px;box-shadow:0 20px 60px #0003;width:440px}label{display:block;margin:14px 0}input,select,textarea{width:100%%;padding:9px;border:1px solid #ccd2dc;border-radius:6px}</style></head><body><div class="shell"><aside class="side"><h1>DbCore</h1><button class="active">数据源</button><button disabled>SQL 查询工作台</button><button disabled>数据库建模</button><button disabled>日志采集</button></aside><main class="main"><div class="head"><div><h1>数据源</h1><p>数据保存在 DbCore 扩展自己的数据目录中。</p></div><button class="primary" onclick="editor.showModal()">新建数据源</button></div><div class="card" id="content"><div class="empty">加载中…</div></div></main></div><dialog id="editor"><form method="dialog" onsubmit="createSource(event)"><h2>新建数据源</h2><label>名称<input id="name" required></label><label>类型<select id="kind"><option value="postgres">PostgreSQL</option><option value="mysql">MySQL</option><option value="sqlite">SQLite</option><option value="excel">Excel</option></select></label><label>URI<input id="uri"></label><label>描述<textarea id="description"></textarea></label><button value="cancel">取消</button> <button class="primary" value="default">保存</button></form></dialog><script>
-const token=%s, headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'};async function load(){const r=await fetch('/api/v1/sources?page=1&page_size=100',{headers});const d=await r.json();content.innerHTML=d.items.length?'<table><thead><tr><th>名称</th><th>类型</th><th>URI</th><th>状态</th><th>操作</th></tr></thead><tbody>'+d.items.map(x=>'<tr><td>'+esc(x.name)+'</td><td>'+esc(x.kind)+'</td><td>'+esc(x.uri||'—')+'</td><td>'+esc(x.status)+'</td><td><button onclick="removeSource(\''+x.id+'\')">删除</button></td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无数据源</div>'}function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}async function createSource(e){e.preventDefault();await fetch('/api/v1/sources',{method:'POST',headers,body:JSON.stringify({name:name.value,kind:kind.value,uri:uri.value,description:description.value})});editor.close();e.target.reset();load()}async function removeSource(id){if(confirm('确定删除？')){await fetch('/api/v1/sources/'+encodeURIComponent(id),{method:'DELETE',headers});load()}}load();</script></body></html>`
+*{box-sizing:border-box}body{margin:0;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f8fa;color:#172033}.shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}.side{background:#151923;color:#fff;padding:24px}.side h1{font-size:20px;margin:0 0 28px}.side button{display:block;width:100%%;padding:11px 12px;margin:5px 0;border:0;border-radius:7px;background:transparent;color:#b9c0cc;text-align:left}.side button.active{background:#2b3242;color:#fff}.main{padding:34px;max-width:1100px}.head{display:flex;justify-content:space-between;align-items:center}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;margin-top:22px;overflow:hidden}.empty{padding:60px;text-align:center;color:#7b8494}table{width:100%%;border-collapse:collapse}th,td{text-align:left;padding:14px;border-bottom:1px solid #edf0f3}button.primary{border:0;border-radius:7px;background:#3056d3;color:#fff;padding:10px 15px}textarea.sql{height:180px;font-family:ui-monospace,monospace}dialog{border:0;border-radius:12px;box-shadow:0 20px 60px #0003;width:440px}label{display:block;margin:14px 0}input,select,textarea{width:100%%;padding:9px;border:1px solid #ccd2dc;border-radius:6px}</style></head><body><div class="shell"><aside class="side"><h1>DbCore</h1><button id="nav-sources" class="active" onclick="show('sources')">数据源</button><button id="nav-sql" onclick="show('sql')">SQL 查询工作台</button><button id="nav-modeling" onclick="show('modeling')">数据库建模</button><button id="nav-logs" onclick="show('logs')">日志采集</button></aside><main class="main"><div class="head"><div><h1 id="title">数据源</h1><p>所有能力运行在 DbCore 独立进程中。</p></div><button id="new" class="primary" onclick="editor.showModal()">新建数据源</button></div><div class="card" id="content"><div class="empty">加载中…</div></div></main></div><dialog id="editor"><form method="dialog" onsubmit="createSource(event)"><h2>新建数据源</h2><label>名称<input id="name" required></label><label>类型<select id="kind"><option value="postgres">PostgreSQL</option><option value="mysql">MySQL</option><option value="sqlite">SQLite</option><option value="excel">Excel</option></select></label><label>URI<input id="uri"></label><label>描述<textarea id="description"></textarea></label><button value="cancel">取消</button> <button class="primary" value="default">保存</button></form></dialog><script>
+const token=%s, headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'};const labels={sources:'数据源',sql:'SQL 查询工作台',modeling:'数据库建模',logs:'日志采集'};function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function show(view){document.getElementById('title').textContent=labels[view];document.getElementById('new').style.display=view==='sources'?'inline-block':'none';for(const id of Object.keys(labels))document.getElementById('nav-'+id).className=id===view?'active':'';if(view==='sources')load();if(view==='sql')content.innerHTML='<div style="padding:22px"><h2>SQL 查询工作台</h2><label>数据源 ID<input id="sourceId"></label><textarea class="sql" id="sql" placeholder="SELECT ..."></textarea><p><button class="primary" onclick="executeSQL()">执行查询</button></p><pre id="result"></pre></div>';if(view==='modeling')loadModeling();if(view==='logs')loadLogs()}async function load(){const r=await fetch('/api/v1/sources?page=1&page_size=100',{headers});const d=await r.json();content.innerHTML=d.items.length?'<table><thead><tr><th>名称</th><th>类型</th><th>URI</th><th>状态</th><th>操作</th></tr></thead><tbody>'+d.items.map(x=>'<tr><td>'+esc(x.name)+'</td><td>'+esc(x.kind)+'</td><td>'+esc(x.uri||'—')+'</td><td>'+esc(x.status)+'</td><td><button onclick="removeSource(\''+x.id+'\')">删除</button> <button onclick="model(\''+x.id+'\')">建模</button></td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无数据源</div>'}async function createSource(e){e.preventDefault();await fetch('/api/v1/sources',{method:'POST',headers,body:JSON.stringify({name:name.value,kind:kind.value,uri:uri.value,description:description.value})});editor.close();e.target.reset();load()}async function removeSource(id){if(confirm('确定删除？')){await fetch('/api/v1/sources/'+encodeURIComponent(id),{method:'DELETE',headers});load()}}async function model(id){const r=await fetch('/api/v1/sources/'+id+'/model',{method:'POST',headers});alert(await r.text())}async function executeSQL(){const r=await fetch('/api/v1/execute',{method:'POST',headers,body:JSON.stringify({source_id:sourceId.value,sql:sql.value})});result.textContent=JSON.stringify(await r.json(),null,2)}async function loadModeling(){const r=await fetch('/api/v1/graph',{headers});const d=await r.json();content.innerHTML='<div style="padding:22px"><h2>数据库建模</h2><p>当前图谱节点：'+(d.nodes?.length||0)+'</p><pre>'+esc(JSON.stringify(d,null,2))+'</pre></div>'}async function loadLogs(){const r=await fetch('/api/v1/logs',{headers});const d=await r.json();content.innerHTML='<div style="padding:22px"><h2>日志采集</h2><pre>'+esc(JSON.stringify(d.items||[],null,2))+'</pre></div>'}load();</script></body></html>`
