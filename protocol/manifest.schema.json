@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/golifez/nexus-extensions/blob/main/protocol/manifest.schema.json",
+  "title": "Nexus Extension Manifest",
+  "type": "object",
+  "required": ["id", "name", "version", "apiVersion", "description", "entry", "ui", "repository", "sourceRef", "permissions"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "name": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
+    "apiVersion": {"type": "string", "pattern": "^[0-9]+$"},
+    "description": {"type": "string", "minLength": 1},
+    "entry": {
+      "type": "object",
+      "required": ["binary"],
+      "properties": {"binary": {"type": "string", "minLength": 1}},
+      "additionalProperties": false
+    },
+    "ui": {
+      "type": "object",
+      "required": ["entryPath"],
+      "properties": {"entryPath": {"type": "string", "pattern": "^/"}},
+      "additionalProperties": false
+    },
+    "repository": {"type": "string", "format": "uri"},
+    "sourceRef": {"type": "string", "minLength": 1},
+    "permissions": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "platforms": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  },
+  "additionalProperties": false
+}

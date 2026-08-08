@@ -1,0 +1,13 @@
+{
+  "id": "replace-me",
+  "name": "Replace Me",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "description": "Describe this extension.",
+  "entry": {"binary": "bin/nexus-extension-replace-me"},
+  "ui": {"entryPath": "/"},
+  "repository": "https://github.com/golifez/nexus-extensions",
+  "sourceRef": "main",
+  "permissions": ["network:local"],
+  "platforms": ["darwin-arm64", "linux-amd64"]
+}
