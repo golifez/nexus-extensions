@@ -1,0 +1,13 @@
+{
+  "id": "dbcore",
+  "name": "DbCore",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "description": "数据源管理、数据库建模、SQL 工作台和日志采集扩展。",
+  "entry": {"binary": "bin/nexus-extension-dbcore"},
+  "ui": {"entryPath": "/"},
+  "repository": "https://github.com/golifez/nexus-extensions",
+  "sourceRef": "main",
+  "permissions": ["network:local", "filesystem:extension-data"],
+  "platforms": ["darwin-arm64", "darwin-amd64", "linux-amd64", "linux-arm64"]
+}
