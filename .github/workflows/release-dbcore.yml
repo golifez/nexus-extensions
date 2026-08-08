@@ -1,0 +1,46 @@
+name: Release DbCore extension
+
+on:
+  push:
+    tags:
+      - 'extension/dbcore/v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - name: Build package
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION##*/}"
+          VERSION="${VERSION#v}"
+          make -C extensions/dbcore package VERSION="$VERSION" OS="${{ matrix.os }}" ARCH="${{ matrix.arch }}"
+          cd "dist/dbcore"
+          sha256sum "nexus-extension-dbcore-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" > "nexus-extension-dbcore-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.sha256"
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/dbcore/*.tar.gz
+            dist/dbcore/*.sha256
+

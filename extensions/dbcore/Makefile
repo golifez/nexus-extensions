@@ -15,3 +15,4 @@ test:
 
 package: build
 	cd $(DIST) && tar -czf ../../nexus-extension-dbcore-$(VERSION)-$(OS)-$(ARCH).tar.gz manifest.json README.md bin
+	cd ../../dist/dbcore && if command -v sha256sum >/dev/null 2>&1; then sha256sum nexus-extension-dbcore-$(VERSION)-$(OS)-$(ARCH).tar.gz; else openssl dgst -sha256 -r nexus-extension-dbcore-$(VERSION)-$(OS)-$(ARCH).tar.gz; fi > nexus-extension-dbcore-$(VERSION)-$(OS)-$(ARCH).sha256
