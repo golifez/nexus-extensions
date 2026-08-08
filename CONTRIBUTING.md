@@ -12,6 +12,8 @@
 - `GET /healthz`、`GET /manifest`、`POST /shutdown`
 - 独立测试和构建说明
 
+提交前在仓库根目录运行 `node scripts/validate-manifests.mjs`；和 GitHub Actions 使用同一套校验。
+
 ## 2. 本地开发
 
 扩展不得依赖 Client 的进程内状态。启动时由 Client 注入以下环境变量：
@@ -76,4 +78,3 @@ nexus-extension-<id>-<version>-<os>-<arch>.tar.gz
 - 业务数据位于 `NEXUS_EXTENSION_DATA_DIR`，默认升级和卸载都保留。
 - 卸载代码不能删除业务数据；彻底删除必须由用户显式确认。
 - 扩展崩溃不得影响 nexus agent，Client 可独立重启扩展并记录日志。
-
